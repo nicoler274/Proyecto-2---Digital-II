@@ -1,0 +1,250 @@
+//******************************************/
+// Universidad del Valle de Guatemala
+// BE3029 - Electronica Digital 2
+// Maryela Morales y Nicole rodriguez
+// 03/11/2025
+// Proyecto de laboratorio
+// MCU: ESP32 dev kit 1.0
+//******************************************/
+
+//******************************************/
+// Librerias
+//******************************************/
+//Se añaden librerías para el correcto funcionamiento del sistema
+#include <Arduino.h>
+#include <LiquidCrystal.h>
+
+//******************************************/
+// Definiciones
+//******************************************/
+//Defincion de LEDs
+#define ledR 19
+#define ledG 18
+#define ledA 5
+
+//Defincion de potenciometro
+#define pot1 33
+
+/*//Defincion de pines de pantalla LCD
+#define rs 34
+#define en 32
+#define d4 25
+#define d5 26
+#define d6 27
+#define d7 14*/
+
+// Canales PWM
+#define pwmChannel1 0
+#define pwmChannel2 1
+#define pwmChannel3 2
+//Paso #3 escoger la frecuencia
+#define freqPWM 5000
+//Paso #4 escoger resolucion de pwm
+#define resPWM 8
+
+//******************************************/
+// Variables globales
+//******************************************/
+//Contadores
+uint8_t contador = 0;
+
+String serialCommand = "";
+bool newCommand = false; 
+bool modoComando = false; 
+
+//Variables para cambio de leds
+int valorRojo = 0;
+int valorVerde = 0;
+int valorAmarillo = 0;
+
+//Instanciar objeto LCD
+//LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+//******************************************/
+// Otras funciones
+//******************************************/
+void initPWM() {
+  ledcSetup(pwmChannel1, freqPWM, resPWM);
+  ledcAttachPin(ledR, pwmChannel1);
+  ledcWrite(pwmChannel1, 0);
+
+  ledcSetup(pwmChannel2, freqPWM, resPWM);
+  ledcAttachPin(ledG, pwmChannel2);
+  ledcWrite(pwmChannel2, 0);
+
+  ledcSetup(pwmChannel3, freqPWM, resPWM);
+  ledcAttachPin(ledA, pwmChannel3);
+  ledcWrite(pwmChannel3, 0);
+}
+
+void ejecutarComandoLed(int led, int tiempo){
+  ledcWrite(pwmChannel1, 0);
+  ledcWrite(pwmChannel2, 0);
+  ledcWrite(pwmChannel3, 0);
+
+  //Switch case para encender el led especifico
+  switch(led){
+    case 1:
+    ledcWrite(pwmChannel1, 255);
+    Serial.println("Led Rojo encendido");
+    break;
+    case 2:
+    ledcWrite(pwmChannel2, 255);
+    Serial.println("Led Verde encendido");
+    break;
+    case 3:
+    ledcWrite(pwmChannel3, 255);
+    Serial.println("Led Amarillo encendido");
+    break;
+    default: 
+    Serial.println("No valido, utilizar: 1, 2 o 3");
+    return;
+  }
+  Serial.print("Tiempo: ");
+  Serial.print(tiempo);
+  Serial.println(" ms");
+  delay(tiempo);
+
+  //Switch case para poder apagar el led que se encendio anteriomente
+  switch(led){
+    case 1:
+      ledcWrite(pwmChannel1, 0);
+      break;
+    case 2:
+      ledcWrite(pwmChannel2, 0);
+      break;
+    case 3:
+      ledcWrite(pwmChannel3, 0);
+      break;
+  }
+  modoComando = false;
+  //AGREGAR LO QUE DEVULEVE AL MENU PRINCIPAL DE SPI
+}
+
+void procesarComandoSerial() {
+  if (Serial.available() > 0) {
+    char c = Serial.read();
+    
+    if (c == '\n' || c == '\r') {
+      if (serialCommand.length() > 0) {
+        newCommand = true;
+      }
+    } else {
+      serialCommand += c;
+    }
+  }
+}
+
+// Función para procesar comandos seriales
+/*void procesarComandoSerial() {
+  if (Serial.available() > 0) {
+    char comando = Serial.read();
+    
+    if (comando == 'variable') {
+      contador++;
+      if (contador > 255) contador = 255; //Escritura superior
+      valorAzul = contador;
+      Serial.print("Azul: ");
+      Serial.println(valorAzul);
+    }
+    else if (comando == '-') {
+      contador--;
+      if (contador < 0) contador = 0; //Escritura inferior
+      valorAzul = contador;
+      Serial.print("Azul: ");
+      Serial.println(valorAzul);
+    }
+  }
+}*/
+
+//******************************************/
+// Configuracion
+//******************************************/
+void setup() {
+  Serial.begin(9600);
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db); 
+  //lcd.begin(16, 2);
+  //lcd.clear();
+  initPWM();
+  
+  pinMode(pot1, INPUT);
+  pinMode(ledR, OUTPUT);
+  pinMode(ledG, OUTPUT);
+  pinMode(ledA, OUTPUT);
+}
+
+//******************************************/
+// Loop Principal
+//******************************************/
+void loop() {
+  procesarComandoSerial();
+
+  //Espera de un comando para iniciar
+  if (newCommand) {
+    String comando = serialCommand;
+    serialCommand = "";
+    newCommand = false;
+    
+    // Esperar comando (formato: "LED,tiempo")
+    int led, tiempo;
+    if (sscanf(comando.c_str(), "%d,%d", &led, &tiempo) == 2) {
+      if (tiempo > 0 && led >= 1 && led <= 3) {
+        modoComando = true;
+        Serial.println("\n se activa modo comando");
+        ejecutarComandoLed(led, tiempo);
+    } else {
+        Serial.println("error: Tiempo debe ser > 0 y Led entre 1-3");
+    }
+    } else {
+      Serial.println("error: Formato inválido. Use: Led ,Tiempo");
+    }
+  }
+
+  if (!modoComando) {
+    int pot = analogRead(pot1);
+
+  // Calculo de valores en voltaje y bits
+    float voltaje = (pot * 3.3)/4095;
+    int valorBits = pot;
+
+  //Mapeo de valores para los leds
+    valorRojo = map(pot, 0, 4095, 0, 255); 
+    valorVerde = map(pot, 0, 4095, 0, 255);
+    valorAmarillo = map(pot, 0, 4095, 0, 255);
+
+  //Ultimo led encendido 
+    String ultimoLED = "";
+    if (valorRojo >= valorVerde && valorRojo >= valorAmarillo) {
+      ultimoLED = "R";
+    } else if (valorVerde >= valorRojo && valorVerde >= valorAmarillo) {
+      ultimoLED = "G";
+    } else {
+      ultimoLED = "A";
+    }
+
+  //Monitor Serial
+    Serial.print("Pot: ");
+    Serial.print(voltaje, 2);
+    Serial.print(" Bits: ");
+    Serial.print(valorBits);
+    Serial.print("Led: ");
+    Serial.println(ultimoLED);
+
+  /*lcd.setCursor(0, 0);
+  lcd.print("V:");
+  lcd.print(voltaje, 2);
+  lcd.print("B");
+  lcd.print(valorBits);
+  lcd.setCursor(0, 1);
+  lcd.print(" Led:");
+  lcd.print(ultimoLED);
+*/
+  // Generar señales PWM para los LEDs
+    ledcWrite(pwmChannel1, valorRojo);  
+    ledcWrite(pwmChannel2, valorVerde); 
+    ledcWrite(pwmChannel3, valorAmarillo);    
+
+    delay(300);
+  }
+}
