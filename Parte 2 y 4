@@ -10,60 +10,104 @@
 //******************************************/
 // Librerias
 //******************************************/
-//Se añaden librerías para el correcto funcionamiento del sistema
+// Se añaden librerías para el correcto funcionamiento del sistema
 #include <Arduino.h>
 #include <LiquidCrystal.h>
+#include <ESP32SPISlave.h>
+#include <Wire.h>
 
 //******************************************/
 // Definiciones
 //******************************************/
-//Defincion de LEDs
-#define ledR 19
-#define ledG 18
-#define ledA 5
+// Defincion de LEDs
+#define ledR 15
+#define ledG 2
+#define ledA 4
 
-//Defincion de potenciometro
+// Defincion de potenciometro
 #define pot1 33
 
-/*//Defincion de pines de pantalla LCD
+// Defincion de pines de pantalla LCD
 #define rs 34
 #define en 32
 #define d4 25
 #define d5 26
 #define d6 27
-#define d7 14*/
+#define d7 14
+
+// Definicion de pines para SPI
+#define SPI_SCK 5
+#define SPI_MISO 18
+#define SPI_MOSI 19
+#define SPI_SS 21
+
+// Definicion I2C
+#define I2C_DEV_ADDR 0x55
 
 // Canales PWM
 #define pwmChannel1 0
 #define pwmChannel2 1
 #define pwmChannel3 2
-//Paso #3 escoger la frecuencia
+// Paso #3 escoger la frecuencia
 #define freqPWM 5000
-//Paso #4 escoger resolucion de pwm
+// Paso #4 escoger resolucion de pwm
 #define resPWM 8
 
 //******************************************/
 // Variables globales
 //******************************************/
-//Contadores
+// Contadores
 uint8_t contador = 0;
 
 String serialCommand = "";
-bool newCommand = false; 
-bool modoComando = false; 
+bool newCommand = false;
+bool modoComando = false;
+bool modoSPI = false;
 
-//Variables para cambio de leds
+// Variables para cambio de leds
 int valorRojo = 0;
 int valorVerde = 0;
 int valorAmarillo = 0;
 
-//Instanciar objeto LCD
-//LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+// Instanciar objeto LCD
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+// Variables para SPI
+volatile byte spiData[4];
+volatile byte spiIndex = 0;
+volatile bool spiCommandReady = false;
+volatile bool spiActive = false;
+
+// Configurar ESP como esclavo
+ESP32SPISlave slave;
+static constexpr u_int32_t BUFFER_SIZE{32};
+uint8_t spi_slave_tx_buf[BUFFER_SIZE];
+uint8_t spi_slave_rx_buf[BUFFER_SIZE];
+//comando para el SPI
+char cmd;
+
+// Para ultimo led
+String ultimoLED = "N";
+
+// Variables para I2C
+uint8_t I2CData[3];
+bool i2cCommandReady = false;
+
+//******************************************/
+// Prototipos de funciones
+//******************************************/
+void initPWM();
+void initSPI();
+void ejecutarComandoLed(int led, int tiempo);
+void procesarComandoSerial();
+void procesarComandoSPI();
+void actualizarLCD(float voltaje, int valorBits, String ultimoLED);
 
 //******************************************/
 // Otras funciones
 //******************************************/
-void initPWM() {
+void initPWM()
+{
   ledcSetup(pwmChannel1, freqPWM, resPWM);
   ledcAttachPin(ledR, pwmChannel1);
   ledcWrite(pwmChannel1, 0);
@@ -77,173 +121,227 @@ void initPWM() {
   ledcWrite(pwmChannel3, 0);
 }
 
-void ejecutarComandoLed(int led, int tiempo){
+void ejecutarComandoLed(int led, int tiempo)
+{
+  // Apagado de leds
   ledcWrite(pwmChannel1, 0);
   ledcWrite(pwmChannel2, 0);
   ledcWrite(pwmChannel3, 0);
 
-  //Switch case para encender el led especifico
-  switch(led){
-    case 1:
+  // Actualizacion de último LED
+  switch (led)
+  {
+  case 1:
+    ultimoLED = "R";
+    break;
+  case 2:
+    ultimoLED = "G";
+    break;
+  case 3:
+    ultimoLED = "A";
+    break;
+  }
+
+  // Switch case para encender el led especifico
+  switch (led)
+  {
+  case 1:
     ledcWrite(pwmChannel1, 255);
     Serial.println("Led Rojo encendido");
     break;
-    case 2:
+  case 2:
     ledcWrite(pwmChannel2, 255);
     Serial.println("Led Verde encendido");
     break;
-    case 3:
+  case 3:
     ledcWrite(pwmChannel3, 255);
     Serial.println("Led Amarillo encendido");
     break;
-    default: 
+  default:
     Serial.println("No valido, utilizar: 1, 2 o 3");
     return;
   }
+  // Esperar el tiempo especificado
   Serial.print("Tiempo: ");
   Serial.print(tiempo);
   Serial.println(" ms");
   delay(tiempo);
 
-  //Switch case para poder apagar el led que se encendio anteriomente
-  switch(led){
-    case 1:
-      ledcWrite(pwmChannel1, 0);
-      break;
-    case 2:
-      ledcWrite(pwmChannel2, 0);
-      break;
-    case 3:
-      ledcWrite(pwmChannel3, 0);
-      break;
+  // Apagar el LED después del tiempo
+  switch (led)
+  {
+  case 1:
+    ledcWrite(pwmChannel1, 0);
+    break;
+  case 2:
+    ledcWrite(pwmChannel2, 0);
+    break;
+  case 3:
+    ledcWrite(pwmChannel3, 0);
+    break;
   }
+  // Banderas para iniciar de nuevo y recibir comando
   modoComando = false;
-  //AGREGAR LO QUE DEVULEVE AL MENU PRINCIPAL DE SPI
+  modoSPI = false;
 }
 
-void procesarComandoSerial() {
-  if (Serial.available() > 0) {
-    char c = Serial.read();
-    
-    if (c == '\n' || c == '\r') {
-      if (serialCommand.length() > 0) {
-        newCommand = true;
-      }
-    } else {
-      serialCommand += c;
-    }
-  }
+void initSPI()
+{
+  // Configurar pines SPI esclavo
+  SPI.begin(SPI_SCK);
+  SPI.begin(SPI_MISO);
+  SPI.begin(SPI_MOSI);
+  SPI.begin(SPI_SS);
+  pinMode(SPI_SS, INPUT);
 }
 
-// Función para procesar comandos seriales
-/*void procesarComandoSerial() {
-  if (Serial.available() > 0) {
-    char comando = Serial.read();
-    
-    if (comando == 'variable') {
-      contador++;
-      if (contador > 255) contador = 255; //Escritura superior
-      valorAzul = contador;
-      Serial.print("Azul: ");
-      Serial.println(valorAzul);
-    }
-    else if (comando == '-') {
-      contador--;
-      if (contador < 0) contador = 0; //Escritura inferior
-      valorAzul = contador;
-      Serial.print("Azul: ");
-      Serial.println(valorAzul);
-    }
-  }
-}*/
+void procesarComandoSPI()
+{
+  static unsigned long lastUpdateSPI
+  // TERMINAR
+}
+
+void actualizarLCD(float voltaje, int valorBits, String ultimoLED)
+{
+  lcd.setCursor(0, 0);
+  lcd.print("V:");
+  lcd.print(voltaje, 2);
+  lcd.print(" ");
+
+  lcd.setCursor(8, 0);
+  lcd.print("B:");
+  lcd.print(valorBits);
+  lcd.print("   "); // Espacios para limpiar caracteres anteriores
+
+  lcd.setCursor(0, 1);
+  lcd.print("Led:");
+  lcd.print(ultimoLED);
+  lcd.print("          "); // Espacios para limpiar caracteres anteriores
+}
 
 //******************************************/
 // Configuracion
 //******************************************/
-void setup() {
-  Serial.begin(9600);
-  analogReadResolution(12);
-  analogSetAttenuation(ADC_11db); 
-  //lcd.begin(16, 2);
-  //lcd.clear();
+void setup()
+{
+  Serial.begin(115200);
   initPWM();
-  
+  initSPI();
+  // Para lectura de potenciometro
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+
+  // Inicializacion de pantalla
+  lcd.begin(16, 2);
+  lcd.clear();
+
+  // Configuracion de entradas y salidas en ESP
   pinMode(pot1, INPUT);
   pinMode(ledR, OUTPUT);
   pinMode(ledG, OUTPUT);
   pinMode(ledA, OUTPUT);
+
+  // Configuracion para Slave
+  // On receive realiza la tarea
+  Wire.onReceive(onReceive);
+  // On Request da info a Nucleo
+  Wire.onRequest(onRequest);
+  // Wire.print() --> funcion que enviaqa el valor a nucleo (master)
+  Wire.begin((uint8_t)I2C_DEV_ADDR);
+  Serial.println("I2C listo");
+
+  // VSPI = CS:5, CLK: 18, MOSI: 23, MISO: 19
+  // Modo SPI
+  slave.setDataMode(SPI_MODE0);
+  slave.setQueueSize(1);
+  slave.begin(VSPI);
+  // Clear buffers
+  memset(spi_slave_tx_buf, 0, BUFFER_SIZE);
+  memset(spi_slave_rx_buf, 0, BUFFER_SIZE);
 }
 
 //******************************************/
 // Loop Principal
 //******************************************/
-void loop() {
+void loop()
+{
   procesarComandoSerial();
+  procesarComandoSPI();
+  slave.wait(spi_slave_rx_buf, spi_slave_tx_buf, BUFFER_SIZE);
+  
+  while (slave.available()){
+    //Jalar la data del nucleo en bites, siendo este primer bite
+    cmd = spi_slave_rx_buf[0]; 
+    slave.pop();
+    if (cmd == 1){
+      //SEGUN EL COMANDO DEL NUCLEO SE REALIZAN LOS COMANDOS DEL ESP 
+      //Se vacia el comando para iniciar con la siguiente instruccion
+      cmd = ' ';
+    }
+  }
 
-  //Espera de un comando para iniciar
-  if (newCommand) {
+  // Espera de un comando para iniciar
+  if (newCommand)
+  {
     String comando = serialCommand;
     serialCommand = "";
     newCommand = false;
-    
+
     // Esperar comando (formato: "LED,tiempo")
     int led, tiempo;
-    if (sscanf(comando.c_str(), "%d,%d", &led, &tiempo) == 2) {
-      if (tiempo > 0 && led >= 1 && led <= 3) {
+    if (sscanf(comando.c_str(), "%d,%d", &led, &tiempo) == 2)
+    {
+      if (tiempo > 0 && led >= 1 && led <= 3)
+      {
         modoComando = true;
         Serial.println("\n se activa modo comando");
         ejecutarComandoLed(led, tiempo);
-    } else {
+      }
+      else
+      {
         Serial.println("error: Tiempo debe ser > 0 y Led entre 1-3");
+      }
     }
-    } else {
+    else
+    {
       Serial.println("error: Formato inválido. Use: Led ,Tiempo");
     }
   }
 
-  if (!modoComando) {
+  if (!modoComando && !modoSPI)
+  {
     int pot = analogRead(pot1);
 
-  // Calculo de valores en voltaje y bits
-    float voltaje = (pot * 3.3)/4095;
+    // Calculo de valores en voltaje y bits
+    float voltaje = (pot * 3.3) / 4095;
     int valorBits = pot;
 
-  //Mapeo de valores para los leds
-    valorRojo = map(pot, 0, 4095, 0, 255); 
+    // Mapeo de valores para los leds
+    valorRojo = map(pot, 0, 4095, 0, 255);
     valorVerde = map(pot, 0, 4095, 0, 255);
     valorAmarillo = map(pot, 0, 4095, 0, 255);
 
-  //Ultimo led encendido 
+    // Ultimo led encendido
     String ultimoLED = "";
-    if (valorRojo >= valorVerde && valorRojo >= valorAmarillo) {
+    if (valorRojo >= valorVerde && valorRojo >= valorAmarillo)
+    {
       ultimoLED = "R";
-    } else if (valorVerde >= valorRojo && valorVerde >= valorAmarillo) {
+    }
+    else if (valorVerde >= valorRojo && valorVerde >= valorAmarillo)
+    {
       ultimoLED = "G";
-    } else {
+    }
+    else
+    {
       ultimoLED = "A";
     }
 
-  //Monitor Serial
-    Serial.print("Pot: ");
-    Serial.print(voltaje, 2);
-    Serial.print(" Bits: ");
-    Serial.print(valorBits);
-    Serial.print("Led: ");
-    Serial.println(ultimoLED);
+    actualizarLCD(voltaje, valorBits, ultimoLED);
 
-  /*lcd.setCursor(0, 0);
-  lcd.print("V:");
-  lcd.print(voltaje, 2);
-  lcd.print("B");
-  lcd.print(valorBits);
-  lcd.setCursor(0, 1);
-  lcd.print(" Led:");
-  lcd.print(ultimoLED);
-*/
-  // Generar señales PWM para los LEDs
-    ledcWrite(pwmChannel1, valorRojo);  
-    ledcWrite(pwmChannel2, valorVerde); 
-    ledcWrite(pwmChannel3, valorAmarillo);    
+    // Generar señales PWM para los LEDs
+    ledcWrite(pwmChannel1, valorRojo);
+    ledcWrite(pwmChannel2, valorVerde);
+    ledcWrite(pwmChannel3, valorAmarillo);
 
     delay(300);
   }
